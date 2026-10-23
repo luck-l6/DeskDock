@@ -1,0 +1,30 @@
+# 打包产物：体积大（onedir 141MB / onefile 55MB），不进仓库。
+# 需要分发时用 tools/build.spec 现打，或挂到 GitHub Release。
+dist/
+build/
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行期数据：在 %APPDATA% / %LOCALAPPDATA%，本来就不在仓库里，
+# 但本地调试时可能出现在工作区，一并忽略。
+*.log
+*.crash.txt
+session.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# WorkBuddy 工作区数据（记忆、会话），属于本地私有内容
+.workbuddy/
+
+# 调试截图：体积大（单张 4MB），且拍的是本机屏幕内容，不进仓库
+tools/frames/
