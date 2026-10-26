@@ -71,7 +71,7 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-MODE = "onefile"
+MODE = "onedir"
 
 exe = EXE(
     pyz,
