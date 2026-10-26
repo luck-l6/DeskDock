@@ -73,6 +73,9 @@ Window {
 
     // 列表变了（装了新软件、刚启动过某个应用）就重新量一次
     onItemsChanged: Qt.callLater(fit)
+    // 设置里改图标大小也要重量。fit() 里对 width/height/x/y 是显式赋值，
+    // 那几条绑定在第一次 fit 之后就已经断了，指望它们自己跟着 barH 变是不可能的
+    onIconSizeChanged: Qt.callLater(fit)
     onVisibleChanged: {
         if (visible) {
             refreshScreen();
