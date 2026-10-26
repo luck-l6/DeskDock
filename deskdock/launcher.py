@@ -34,6 +34,10 @@ def _pick_target(entry: AppEntry) -> str:
     优先用磁盘上的原始条目（.lnk / 文件 / 文件夹本身），让 Shell 按它
     原本的含义打开；只有原始条目不存在时才退回快捷方式指向的 target。
     """
+    # Shell 命名空间（此电脑、回收站）：磁盘上没有对应文件，
+    # os.path.exists 必然 False，得跳过下面那层存在性筛选
+    if entry.kind == "special":
+        return entry.path or entry.target
     for candidate in (entry.path, entry.target):
         if candidate and os.path.exists(candidate):
             return candidate

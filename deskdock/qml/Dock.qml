@@ -14,10 +14,12 @@ Window {
     id: dock
 
     // 放大时图标会溢出格子，窗口要留出这一圈余量，否则超出的部分被裁掉
-    readonly property int pad: 14
+    readonly property int pad: 18
     readonly property int iconSize: controller.dockIconSize
-    readonly property int barH: iconSize + 20
+    readonly property int barH: iconSize + 22
     readonly property var items: controller.dockItems
+    // 固定系统项（此电脑、回收站）：不混在应用里，单独一组放最左
+    readonly property var specials: controller.dockSpecial
 
     property var scr: null
     property bool reported: false
@@ -111,6 +113,60 @@ Window {
     // 后者会把图标的点击事件全吃掉
     HoverHandler { id: hover }
 
+    // 一个图标格子。固定系统项和普通应用长得一样，共用这一份定义
+    Component {
+        id: dockIcon
+
+        Item {
+            id: cell
+            Layout.preferredWidth: dock.iconSize
+            Layout.preferredHeight: dock.iconSize
+            z: cellMa.containsMouse ? 3 : 1
+
+            scale: cellMa.containsMouse ? 1.2 : 1.0
+            transform: Translate { y: cellMa.containsMouse ? -4 : 0 }
+            Behavior on scale {
+                NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+            }
+
+            Image {
+                id: icon
+                anchors.fill: parent
+                source: modelData.iconPath ? "file:///" + modelData.iconPath : ""
+                // 按 2x 取图再缩到 iconSize，边缘才不发毛
+                sourceSize: Qt.size(dock.iconSize * 2, dock.iconSize * 2)
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+                visible: status === Image.Ready
+            }
+
+            // 图标还没提取出来：先放首字母，别留个空洞
+            Rectangle {
+                anchors.fill: parent
+                radius: 12
+                visible: !icon.visible
+                color: "#2BFFFFFF"
+                border.width: 1
+                border.color: "#1AFFFFFF"
+                Text {
+                    anchors.centerIn: parent
+                    text: modelData.name ? modelData.name.charAt(0) : "?"
+                    color: "#D9FFFFFF"
+                    font.pixelSize: Math.round(dock.iconSize * 0.42)
+                    font.weight: Font.DemiBold
+                }
+            }
+
+            MouseArea {
+                id: cellMa
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: controller.launchDockItem(modelData.entryId)
+            }
+        }
+    }
+
     Item {
         id: stage
         anchors.centerIn: parent
@@ -120,7 +176,7 @@ Window {
         Rectangle {
             id: glass
             anchors.fill: parent
-            radius: 17
+            radius: 22
 
             gradient: Gradient {
                 GradientStop {
@@ -160,7 +216,7 @@ Window {
 
         Rectangle {
             anchors.fill: glass
-            radius: 17
+            radius: 22
             color: "transparent"
             border.width: 1
             border.color: hover.hovered ? "#4AFFFFFF" : "#24FFFFFF"
@@ -170,7 +226,7 @@ Window {
         RowLayout {
             id: bar
             anchors.centerIn: parent
-            spacing: 4
+            spacing: 5
 
             // ---- 左：全部应用（和胶囊同一个入口）----
             Item {
@@ -179,7 +235,7 @@ Window {
 
                 Rectangle {
                     anchors.fill: parent
-                    radius: 9
+                    radius: 12
                     color: launcher.containsMouse ? "#2EFFFFFF" : "transparent"
                     Behavior on color { ColorAnimation { duration: 140 } }
                 }
@@ -187,14 +243,14 @@ Window {
                 Grid {
                     columns: 2
                     rows: 2
-                    spacing: 3.5
+                    spacing: 4.5
                     anchors.centerIn: parent
                     Repeater {
                         model: 4
                         Rectangle {
-                            width: 6
-                            height: 6
-                            radius: 1.8
+                            width: 8
+                            height: 8
+                            radius: 2.4
                             color: launcher.containsMouse ? "#F2FFFFFF" : "#B3FFFFFF"
                             Behavior on color { ColorAnimation { duration: 140 } }
                         }
@@ -212,66 +268,34 @@ Window {
 
             Rectangle {
                 Layout.preferredWidth: 1
-                Layout.preferredHeight: 20
+                Layout.preferredHeight: 26
                 color: "#26FFFFFF"
             }
 
-            // ---- 中：最高频的应用 ----
+            // ---- 固定系统项：此电脑、回收站 ----
+            // 钉在应用前面，中间隔一条线：它们不是"装的程序"，
+            // 混在按使用频率排的应用里会显得毫无章法
             Repeater {
-                model: dock.items
-                delegate: Item {
-                    id: cell
-                    Layout.preferredWidth: dock.iconSize
-                    Layout.preferredHeight: dock.iconSize
-                    z: cellMa.containsMouse ? 3 : 1
-
-                    scale: cellMa.containsMouse ? 1.2 : 1.0
-                    transform: Translate { y: cellMa.containsMouse ? -3 : 0 }
-                    Behavior on scale {
-                        NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
-                    }
-
-                    Image {
-                        id: icon
-                        anchors.fill: parent
-                        source: modelData.iconPath ? "file:///" + modelData.iconPath : ""
-                        // 按 2x 取图，缩到 34px 才不糊
-                        sourceSize: Qt.size(dock.iconSize * 2, dock.iconSize * 2)
-                        fillMode: Image.PreserveAspectFit
-                        smooth: true
-                        visible: status === Image.Ready
-                    }
-
-                    // 图标还没提取出来：先放首字母，别留个空洞
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: 8
-                        visible: !icon.visible
-                        color: "#2BFFFFFF"
-                        border.width: 1
-                        border.color: "#1AFFFFFF"
-                        Text {
-                            anchors.centerIn: parent
-                            text: modelData.name ? modelData.name.charAt(0) : "?"
-                            color: "#D9FFFFFF"
-                            font.pixelSize: Math.round(dock.iconSize * 0.42)
-                            font.weight: Font.DemiBold
-                        }
-                    }
-
-                    MouseArea {
-                        id: cellMa
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: controller.launchDockItem(modelData.entryId)
-                    }
-                }
+                model: dock.specials
+                delegate: dockIcon
             }
 
             Rectangle {
                 Layout.preferredWidth: 1
-                Layout.preferredHeight: 20
+                Layout.preferredHeight: 26
+                color: "#26FFFFFF"
+                visible: dock.specials.length > 0
+            }
+
+            // ---- 最高频的应用 ----
+            Repeater {
+                model: dock.items
+                delegate: dockIcon
+            }
+
+            Rectangle {
+                Layout.preferredWidth: 1
+                Layout.preferredHeight: 26
                 color: "#26FFFFFF"
             }
 
@@ -282,36 +306,36 @@ Window {
 
                 Rectangle {
                     anchors.fill: parent
-                    radius: 9
+                    radius: 12
                     color: gearMa.containsMouse ? "#2EFFFFFF" : "transparent"
                     Behavior on color { ColorAnimation { duration: 140 } }
                 }
 
                 Canvas {
                     anchors.centerIn: parent
-                    width: 18
-                    height: 18
+                    width: 24
+                    height: 24
                     opacity: gearMa.containsMouse ? 1.0 : 0.82
                     Behavior on opacity { NumberAnimation { duration: 140 } }
                     onPaint: {
                         var ctx = getContext("2d");
                         ctx.reset();
-                        ctx.translate(9, 9);
+                        ctx.translate(12, 12);
                         ctx.fillStyle = "#E6FFFFFF";
                         var teeth = 8;
                         for (var i = 0; i < teeth; i++) {
                             ctx.save();
                             ctx.rotate(i * Math.PI * 2 / teeth);
-                            ctx.fillRect(-1.5, -8.2, 3.0, 3.6);
+                            ctx.fillRect(-2.0, -10.9, 4.0, 4.8);
                             ctx.restore();
                         }
                         ctx.beginPath();
-                        ctx.arc(0, 0, 6.0, 0, Math.PI * 2);
+                        ctx.arc(0, 0, 8.0, 0, Math.PI * 2);
                         ctx.fill();
                         // 挖掉中心做出轴孔
                         ctx.globalCompositeOperation = "destination-out";
                         ctx.beginPath();
-                        ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+                        ctx.arc(0, 0, 3.3, 0, Math.PI * 2);
                         ctx.fill();
                     }
                 }

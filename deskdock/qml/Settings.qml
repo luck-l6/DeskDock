@@ -83,6 +83,103 @@ Window {
         signal toggled(bool value)
     }
 
+    // 数值档位行：Dock 图标大小这种"调一下看看"的参数，−/+ 比滑块更省地方，
+    // 也不用引 Qt Quick Controls（这一整个界面都是自绘的）
+    component StepRow: Item {
+        id: strow
+        property string label: ""
+        property int value: 48
+        property int step: 4
+        property int low: 28
+        property int high: 64
+        width: parent.width
+        height: 34
+        // 信号参数叫 newValue 而不是 value：后者会和本组件的 value 属性撞名，
+        // 处理器里到底指哪个容易出错
+        signal changed(int newValue)
+
+        Text {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: strow.label
+            color: "#CBD6E0"
+            font.family: "Microsoft YaHei UI"
+            font.pixelSize: 13
+        }
+
+        Row {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 4
+
+            Rectangle {
+                width: 30
+                height: 28
+                radius: 8
+                color: minusMa.containsMouse ? "#1AFFFFFF" : "#0FFFFFFF"
+                border.width: 1
+                border.color: "#2B333C"
+                opacity: strow.value > strow.low ? 1.0 : 0.35
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "−"
+                    color: "#EAF1F7"
+                    font.family: "Microsoft YaHei UI"
+                    font.pixelSize: 16
+                }
+
+                MouseArea {
+                    id: minusMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    enabled: strow.value > strow.low
+                    onClicked: strow.changed(Math.max(strow.low, strow.value - strow.step))
+                }
+            }
+
+            Text {
+                width: 46
+                height: 28
+                anchors.verticalCenter: parent.verticalCenter
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                text: strow.value + " px"
+                color: "#EAF1F7"
+                font.family: "Microsoft YaHei UI"
+                font.pixelSize: 13
+            }
+
+            Rectangle {
+                width: 30
+                height: 28
+                radius: 8
+                color: plusMa.containsMouse ? "#1AFFFFFF" : "#0FFFFFFF"
+                border.width: 1
+                border.color: "#2B333C"
+                opacity: strow.value < strow.high ? 1.0 : 0.35
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "+"
+                    color: "#EAF1F7"
+                    font.family: "Microsoft YaHei UI"
+                    font.pixelSize: 15
+                }
+
+                MouseArea {
+                    id: plusMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    enabled: strow.value < strow.high
+                    onClicked: strow.changed(Math.min(strow.high, strow.value + strow.step))
+                }
+            }
+        }
+    }
+
     // 小药丸：二选一用
     component Pill: Rectangle {
         id: pill
@@ -448,6 +545,13 @@ Window {
                         label: "显示底部 Dock 栏"
                         checked: controller.dockVisible
                         onToggled: controller.setDockVisible(value)
+                    }
+                    StepRow {
+                        label: "Dock 图标大小"
+                        value: controller.dockIconSize
+                        // 不直接改 value，交给 Python 存盘后再由 optionsChanged 回流，
+                        // 这样绑定不会被自己写断
+                        onChanged: controller.setDockIconSize(newValue)
                     }
                     SwitchRow {
                         label: "胶囊平时半透明淡出"

@@ -26,14 +26,16 @@ _DEFAULTS: dict[str, Any] = {
     "hide_system_desktop_icons": True, # 关掉 Windows 自己的桌面图标
     "hide_uninstallers": True,
     "hide_console_apps": True,         # 控制台程序（解释器、命令行工具）不收
-    "capsule_visible": True,
+    # 有了底部 Dock（左边格子就是同一个入口），胶囊默认不再显示。
+    # 想要的话设置里随时能开回来。
+    "capsule_visible": False,
     "capsule_x": -1,                   # -1 表示未设置，首次启动自动贴右下角
     "capsule_y": -1,
     "capsule_auto_hide": True,         # 鼠标不靠近时半透明淡出
     "capsule_always_on_desktop": True, # 嵌到桌面图层（Win+D 时跟随桌面）
     # 底部 Dock 栏：常驻的一条图标条，点图标直接启动，不用先唤起面板
     "dock_visible": True,
-    "dock_icon_size": 34,              # 单个图标的逻辑像素边长
+    "dock_icon_size": 48,              # 单个图标的逻辑像素边长
     "dock_max_items": 12,              # 最多显示几个应用（按使用频率取前 N 个）
     "sort_by": "frequency",            # frequency | name | manual（拖拽排出来的顺序）
     "order": [],                       # manual 模式下的 id 顺序；不在表里的排在末尾
@@ -48,11 +50,14 @@ _DEFAULTS: dict[str, Any] = {
 _lock = threading.Lock()
 
 # 默认值改过语义时用它把老配置抬上来，不然用户文件里那句旧默认值永远生效
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _MIGRATIONS: dict[int, dict[str, Any]] = {
     # v1 -> v2：公共开始菜单当年默认关着，老用户文件里的 False 不是他自己选的
     2: {"source_common_start_menu": True},
+    # v2 -> v3：底部 Dock 接管了胶囊的活（左边格子就是同一个入口），
+    # 老用户手里的 "胶囊可见" 是当年没有 Dock 时设的，一并关掉
+    3: {"capsule_visible": False},
 }
 
 

@@ -247,6 +247,12 @@ class AppFilterModel(QSortFilterProxyModel):
             return False
 
         entry_id = str(model.data(idx, AppModel.IdRole) or "")
+        kind = str(model.data(idx, AppModel.KindRole) or "")
+
+        # "special"（此电脑、回收站）只属于底部 Dock。面板的分类里没有这一档，
+        # "全部"又是不过滤的，不显式挡掉它们就会混进应用列表。
+        if kind == "special":
+            return False
 
         # 打字的时候不再看分类：想找的东西在哪个分类里，用户不应该先想明白。
         # 清空搜索框才回到分类视图。

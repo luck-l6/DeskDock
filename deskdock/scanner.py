@@ -36,6 +36,17 @@ _INSTALLER_PATTERN = re.compile(
     r"[-_ .](amd64|x64|x86|win64|win32|arm64)$", re.IGNORECASE
 )
 
+#: Dock 里的固定系统项。它们活在 Shell 命名空间里，磁盘上没有对应的 .lnk，
+#: 扫描自然扫不到——但"打开此电脑""清空回收站"是最高频的动作之一，
+#: 与其让人去面板里翻，不如直接钉在 Dock 上。
+#: (条目 id, 显示名, Shell 命名空间路径)
+SPECIAL_ENTRIES: tuple[tuple[str, str, str], ...] = (
+    ("special:computer", "此电脑",
+     "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"),
+    ("special:recycle", "回收站",
+     "::{645FF040-5081-101B-9F08-00AA002F954E}"),
+)
+
 # 开始菜单里这几个目录装的是系统工具（磁盘清理、注册表编辑器、放大镜…），
 # 不是"应用"。整目录跳过，比挨个拉黑名字准得多。
 _SKIP_DIRS = {
@@ -90,6 +101,29 @@ class AppEntry:
             "iconSource": self.icon_source,
             "description": self.description,
         }
+
+
+def special_entries() -> list[AppEntry]:
+    """Dock 用的固定系统项（此电脑、回收站）。
+
+    kind 标成 "special"：面板的分类里没有这一档，它们不会混进应用列表，
+    只在 Dock 最左边出现。
+    """
+    from .icons import CLSID_PREFIX
+
+    return [
+        AppEntry(
+            id=eid,
+            name=name,
+            path=ns,
+            target=ns,
+            kind="special",
+            source="special",
+            icon_source=CLSID_PREFIX + ns,
+            description=name,
+        )
+        for eid, name, ns in SPECIAL_ENTRIES
+    ]
 
 
 def make_id(kind: str, key: str) -> str:

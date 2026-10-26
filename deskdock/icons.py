@@ -25,6 +25,13 @@ ICON_VERSION = "v3"  # 改尺寸/算法时递增，让旧缓存自动失效
 BATCH_SIZE = 8
 BATCH_INTERVAL_MS = 12
 
+#: icon_source 带这个前缀时，按 Shell 命名空间取图标而不是按文件路径
+CLSID_PREFIX = "shellns:"
+
+_SHGFI_ICON = 0x00000100
+_SHGFI_SHELLICONSIZE = 0x00000004
+_SHGFI_PIDL = 0x00000008
+
 
 def _cache_dir() -> Path:
     p = localappdata_dir() / "icons"
@@ -35,6 +42,60 @@ def _cache_dir() -> Path:
 def _cache_key(icon_source: str) -> str:
     digest = hashlib.md5(icon_source.encode("utf-8", "ignore")).hexdigest()
     return f"{digest}_{ICON_VERSION}.png"
+
+
+def _shell_namespace_icon(ns_path: str):
+    """按 Shell 命名空间路径取系统图标（"此电脑" "回收站" 这类）。
+
+    它们不是磁盘上的文件，没有路径能交给 QFileIconProvider，只能用
+    SHGetFileInfo 按 PIDL 问系统要。SHGFI_SHELLICONSIZE 取到的是 48x48，
+    正好够 Dock 用。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        from PyQt5.QtWinExtras import QtWin
+    except Exception:
+        return None
+
+    class SHFILEINFOW(ctypes.Structure):
+        _fields_ = [("hIcon", wintypes.HICON), ("iIcon", ctypes.c_int),
+                    ("dwAttributes", wintypes.DWORD),
+                    ("szDisplayName", wintypes.WCHAR * 260),
+                    ("szTypeName", wintypes.WCHAR * 80)]
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    shell32.ILCreateFromPathW.argtypes = [ctypes.c_wchar_p]
+    shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+    shell32.SHGetFileInfoW.argtypes = [ctypes.c_void_p, wintypes.DWORD,
+                                       ctypes.POINTER(SHFILEINFOW),
+                                       ctypes.c_uint, ctypes.c_uint]
+    shell32.SHGetFileInfoW.restype = ctypes.c_void_p
+
+    pidl = shell32.ILCreateFromPathW(ns_path)
+    if not pidl:
+        return None
+    try:
+        sfi = SHFILEINFOW()
+        flags = _SHGFI_PIDL | _SHGFI_ICON | _SHGFI_SHELLICONSIZE
+        got = shell32.SHGetFileInfoW(pidl, 0, ctypes.byref(sfi),
+                                     ctypes.sizeof(sfi), flags)
+        if not got or not sfi.hIcon:
+            return None
+        try:
+            return QtWin.fromHICON(sfi.hIcon)
+        finally:
+            user32.DestroyIcon(sfi.hIcon)
+    except Exception:
+        return None
+    finally:
+        try:
+            shell32.ILFree.argtypes = [ctypes.c_void_p]
+            shell32.ILFree(pidl)
+        except Exception:
+            pass
 
 
 def _trim_transparent(pix: QPixmap) -> QImage:
@@ -195,6 +256,9 @@ class IconStore(QObject):
         if out.exists() and out.stat().st_size > 0:
             return str(out).replace("\\", "/")
 
+        if icon_source.startswith(CLSID_PREFIX):
+            return self._extract_namespace(icon_source)
+
         icon: QIcon = self._provider.icon(QFileInfo(icon_source))
         if icon.isNull():
             return None
@@ -212,5 +276,19 @@ class IconStore(QObject):
         # 先裁掉透明边距，再等比缩放进正方形画布
         canvas = _fit_square(_trim_transparent(pix), ICON_SIZE)
         if not canvas.save(str(out), "PNG"):
+            return None
+        return str(out).replace("\\", "/")
+
+    def _extract_namespace(self, icon_source: str) -> str | None:
+        """Shell 命名空间图标（此电脑/回收站）。
+
+        源图只有 48x48，硬放大到 256 只会糊；存 96 就够 Dock 的 2x 采样。
+        """
+        pix = _shell_namespace_icon(icon_source[len(CLSID_PREFIX):])
+        if pix is None or pix.isNull():
+            return None
+        out = self._dir / _cache_key(icon_source)
+        canvas = _fit_square(_trim_transparent(pix), 96)
+        if canvas.isNull() or not canvas.save(str(out), "PNG"):
             return None
         return str(out).replace("\\", "/")

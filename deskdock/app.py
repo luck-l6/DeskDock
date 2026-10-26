@@ -37,7 +37,7 @@ from .icons import IconStore
 from .launcher import launch, open_in_explorer
 from .model import AppFilterModel, AppModel
 from .pinyin import warmup as warmup_pinyin
-from .scanner import AppEntry, scan, source_dirs
+from .scanner import SPECIAL_ENTRIES, AppEntry, scan, source_dirs, special_entries
 
 log = logging.getLogger(__name__)
 
@@ -428,9 +428,22 @@ class Controller(QObject):
 
     def getDockIconSize(self) -> int:
         try:
-            return max(20, min(64, int(config.get("dock_icon_size") or 34)))
+            return max(28, min(64, int(config.get("dock_icon_size") or 48)))
         except (TypeError, ValueError):
-            return 34
+            return 48
+
+    @pyqtSlot(int)
+    def setDockIconSize(self, size: int) -> None:
+        """Dock 图标大小。范围收紧到 28–64：再小就点不准，再大一个屏幕放不下几个。"""
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            return
+        size = max(28, min(64, size))
+        if size == self.getDockIconSize():
+            return
+        config.set("dock_icon_size", size)
+        self.optionsChanged.emit()
 
     dockIconSize = pyqtProperty(int, getDockIconSize, notify=optionsChanged)
 
@@ -458,6 +471,30 @@ class Controller(QObject):
             if len(items) >= limit:
                 break
         return items
+
+    def getDockSpecial(self) -> list:
+        """Dock 最左边的固定系统项（此电脑、回收站）。
+
+        和 dockItems 分开给：QML 里两组之间要插一条分隔线，混在一个列表里
+        没法分。它们不进面板，是 Dock 独有的。
+        """
+        # 顺序照 SPECIAL_ENTRIES 定，不能用模型的顺序。模型按"使用频率 + 名字"
+        # 排，中文名比大小是按码位的：回 U+56DE < 此 U+6B64，于是回收站会跑到
+        # 此电脑前面，和 Windows 桌面上的习惯顺序正好相反。
+        rank = {eid: i for i, (eid, _name, _ns) in enumerate(SPECIAL_ENTRIES)}
+        rows = [e for e in self.model.all_entries() if e.kind == "special"]
+        rows.sort(key=lambda e: rank.get(e.id, len(rank)))
+        items: list[dict] = []
+        for e in rows:
+            items.append({
+                "entryId": e.id,
+                "name": e.name,
+                "iconPath": self.model.icon_path(e.id),
+            })
+        return items
+
+    dockSpecial = pyqtProperty("QVariantList", getDockSpecial,
+                               notify=dockItemsChanged)
 
     dockItems = pyqtProperty("QVariantList", getDockItems,
                              notify=dockItemsChanged)
@@ -928,6 +965,8 @@ class Controller(QObject):
     # ---------------- 内部 ----------------
 
     def _on_scan_finished(self, entries) -> None:
+        # 固定系统项（此电脑、回收站）排在最前，Dock 按这个顺序摆
+        entries = special_entries() + list(entries)
         self.model.set_entries(list(entries))
         self._recount_categories()
         hits = self.icons.prime([(e.id, e.icon_source) for e in entries])
@@ -1308,22 +1347,41 @@ def main() -> int:
         _QTimer.singleShot(1500, _prewarm_show)
         _QTimer.singleShot(3300, _prewarm_hide)
 
-    # 调试用：把 Dock 窗口自己的渲染结果存成图片。截图受锁屏 / 其它置顶窗口
-    # 干扰，这个走 QQuickWindow::grabWindow()，抓的是窗口内容本身。
+    # 调试用：把某个窗口**自身**的渲染结果存成图片。
+    # 屏幕截图不可靠：锁屏时拍到的是锁屏画面，被全屏视频之类置顶窗口盖住时
+    # 拍到的是那个窗口（两次都误判成"根本没渲染"）。QQuickWindow::grabWindow()
+    # 抓的是窗口内容本身，屏幕上盖了什么完全无关。
+    #   DESKDOCK_SHOT="dock=D:\out\dock.png;settings=D:\out\set.png"
+    # 指定 settings 会先把设置页打开再抓。老的 DESKDOCK_DOCK_SHOT 仍然有效。
+    _shot_spec = os.environ.get("DESKDOCK_SHOT", "").strip()
     if os.environ.get("DESKDOCK_DOCK_SHOT"):
-        def _shot_dock():
-            win = ctrl._dock
+        _shot_spec = (_shot_spec + ";dock=" + os.environ["DESKDOCK_DOCK_SHOT"]).strip(";")
+    _shot_targets = []
+    for _part in _shot_spec.split(";"):
+        if "=" not in _part:
+            continue
+        _k, _v = _part.split("=", 1)
+        if _v.strip():
+            _shot_targets.append((_k.strip().lower(), _v.strip()))
+    if _shot_targets:
+
+        def _grab(name: str, path: str) -> None:
+            win = getattr(ctrl, "_" + name, None)
             if win is None:
-                log.info("Dock 抓图：窗口还没注册")
+                log.info("%s 抓图：窗口还没注册", name)
                 return
             try:
                 img = win.grabWindow()
-                ok = img.save(os.environ["DESKDOCK_DOCK_SHOT"], "PNG")
-                log.info("Dock 抓图 %dx%d 保存=%s", img.width(), img.height(), ok)
+                ok = img.save(path, "PNG")
+                log.info("%s 抓图 %dx%d 保存=%s", name, img.width(), img.height(), ok)
             except Exception as exc:
-                log.exception("Dock 抓图失败: %s", exc)
+                log.exception("%s 抓图失败: %s", name, exc)
 
-        _QTimer.singleShot(9000, _shot_dock)
+        if any(k == "settings" for k, _ in _shot_targets):
+            _QTimer.singleShot(2500, ctrl.openSettings)
+        for _k, _v in _shot_targets:
+            # 用默认参数把循环变量钉住，否则所有 lambda 都指向最后一次迭代
+            _QTimer.singleShot(6000, lambda k=_k, v=_v: _grab(k, v))
 
     # ---- 系统桌面图标：埋好恢复兜底再隐藏，退出时必须还回去 ----
     crashed = _mark_session_start()
