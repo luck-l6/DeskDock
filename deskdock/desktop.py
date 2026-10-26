@@ -21,6 +21,7 @@ advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 WM_SETTINGCHANGE = 0x001A
 HWND_BROADCAST = 0xFFFF
 SMTO_NORMAL = 0x0000
+SMTO_ABORTIFHUNG = 0x0002
 SHCNE_ASSOCCHANGED = 0x08000000
 SHCNF_IDLIST = 0x0000
 
@@ -209,6 +210,13 @@ def _emergency_restore() -> None:
     把图标切回来，把注册表改回 0。
     """
     try:
+        # 只有确认是我们隐藏的（HideIcons=1）才动手。VEH 会被各种库触发，
+        # 不加这道判断的话，别人一次无关的 SEH 就会把用户的图标切回来。
+        if _get_dword(HKEY_CURRENT_USER, ADVANCED_KEY, "HideIcons") != 1:
+            return
+    except Exception:
+        pass
+    try:
         progman = user32.FindWindowW("Progman", "Program Manager")
         dv = 0
         if progman:
@@ -227,11 +235,36 @@ def _emergency_restore() -> None:
             user32.EnumWindows(_enum, 0)
             dv = res.value
         if dv:
+            # 崩溃现场不能等：目标窗口若已挂起，ABORTIFHUNG 立刻返回，
+            # 总比把整个进程卡死在异常处理器里强
             user32.SendMessageTimeoutW(dv, WM_COMMAND, CMD_TOGGLE_DESKTOP_ICONS,
-                                       0, SMTO_NORMAL, 500, None)
+                                       0, SMTO_ABORTIFHUNG, 400, None)
         _set_dword(HKEY_CURRENT_USER, ADVANCED_KEY, "HideIcons", 0)
     except Exception:
         pass
+
+
+#: 只在真正要命的异常码上动手。VEH 对进程里**所有** SEH 异常都会回调，
+#: 包括 C++ 抛异常（0xE06D7363）、.NET、以及 Qt 内部自有的一些流程，
+#: 那些都得放行——否则桌面图标会被莫名其妙地反复切来切去。
+_FATAL_EXCEPTION_CODES = frozenset({
+    0xC0000005,   # STATUS_ACCESS_VIOLATION
+    0xC0000094,   # STATUS_INTEGER_DIVIDE_BY_ZERO
+    0xC00000FD,   # STATUS_STACK_OVERFLOW
+    0xC0000374,   # STATUS_HEAP_CORRUPTION
+    0xC0000409,   # STATUS_STACK_BUFFER_OVERRUN
+    0x8001010D,   # RPC_E_CANTCALLOUT_IN_INPUTSYNCCALL：本机实测崩溃前先报的就是它
+})
+
+_restore_state = {"done": False}
+
+#: 回调对象**必须**在这里钉住。ctypes 的 WINFUNCTYPE 回调一旦被垃圾回收，
+#: 系统手里那个函数指针就成了悬空指针——注册照样返回成功句柄，一到真崩溃
+#: 就谁也不认识谁。这两个名字就是干这个用的，不要删。
+#: （踩过：回调原本是 install_crash_restore_hook() 里的局部变量，函数返回
+#:  即被回收，于是整条崩溃恢复链路从来没真正生效过。）
+_VEH_REF: object | None = None
+_FILTER_REF: object | None = None
 
 
 def arm_restore_fallback() -> bool:
@@ -263,11 +296,51 @@ def restore_fallback_armed() -> bool:
 
 
 def install_crash_restore_hook() -> None:
-    """注册未处理异常过滤器：进程硬崩溃时先把图标还回去。
+    """进程硬崩时先把桌面图标还回去。
 
-    atexit 只覆盖正常退出路径，而 Qt 在 native 层 abort 时根本不走 Python。
-    这是最后一道保险。
+    atexit 只覆盖正常退出路径，Qt 在 native 层炸掉时根本走不到 Python。
+
+    这里挂两条，因为它们吃到的异常不一样：
+
+    - **Vectored Exception Handler（第一顺位）**：比 Python 自己的
+      faulthandler 还早。这一条是实测补上的——2026-10-26 那次崩溃，
+      faulthandler 先把栈写进 crash.txt 就让进程没了，
+      SetUnhandledExceptionFilter **一次都没进**，图标于是再也没还回来。
+    - **SetUnhandledExceptionFilter**：兜住 VEH 之后仍然没人认领的那些。
     """
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        PVEH = ctypes.WINFUNCTYPE(wintypes.LONG, ctypes.c_void_p)
+
+        @PVEH
+        def _veh(info):
+            try:
+                if _restore_state["done"] or not info:
+                    return 0
+                # PEXCEPTION_POINTERS -> PEXCEPTION_RECORD -> ExceptionCode
+                rec = ctypes.cast(info, ctypes.POINTER(ctypes.c_void_p))[0]
+                if not rec:
+                    return 0
+                code = ctypes.cast(rec, ctypes.POINTER(ctypes.c_ulong))[0]
+                if code not in _FATAL_EXCEPTION_CODES:
+                    return 0
+                _restore_state["done"] = True
+                _emergency_restore()
+            except Exception:
+                pass
+            # 0 = EXCEPTION_CONTINUE_SEARCH：还完图标照旧交给 faulthandler，
+            # 这样 crash.txt 里的栈还能留下来
+            return 0
+
+        k32.AddVectoredExceptionHandler.argtypes = [wintypes.ULONG, PVEH]
+        k32.AddVectoredExceptionHandler.restype = ctypes.c_void_p
+        global _VEH_REF
+        _VEH_REF = _veh
+        k32.AddVectoredExceptionHandler(1, _VEH_REF)
+    except Exception:
+        pass
+
     try:
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         FILTER = ctypes.WINFUNCTYPE(wintypes.LONG, ctypes.POINTER(ctypes.c_void_p))
@@ -275,11 +348,15 @@ def install_crash_restore_hook() -> None:
 
         @FILTER
         def _filter(_info):
-            _emergency_restore()
+            if not _restore_state["done"]:
+                _restore_state["done"] = True
+                _emergency_restore()
             return 1  # EXCEPTION_EXECUTE_HANDLER：让进程安静退出
 
         k32.SetUnhandledExceptionFilter.argtypes = [FILTER]
-        k32.SetUnhandledExceptionFilter(_filter)
+        global _FILTER_REF
+        _FILTER_REF = _filter
+        k32.SetUnhandledExceptionFilter(_FILTER_REF)
     except Exception:
         pass
 

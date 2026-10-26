@@ -1206,6 +1206,15 @@ def main() -> int:
         if crashed:
             log.warning("检测到上次非正常退出，先把桌面图标恢复一次")
             desk.set_desktop_icons_visible(True)
+            # 崩溃这种事不该让用户自己猜。崩溃当时图标已经由异常钩子还回去了，
+            # 这里再明确说一声，顺便告诉他还有个手动开关。
+            try:
+                tray.showMessage(
+                    "DeskDock", "上次是异常退出的，桌面图标已自动恢复。"
+                    "若没看到图标，可从托盘菜单里手动恢复。",
+                    QSystemTrayIcon.Information, 6000)
+            except Exception:
+                pass
         desk.arm_restore_fallback()
         desk.set_desktop_icons_visible(False)
     if config.get("run_at_startup"):

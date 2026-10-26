@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QGuiApplication, QImage
@@ -19,10 +20,25 @@ log = logging.getLogger(__name__)
 
 
 class BackdropProvider(QQuickImageProvider):
-    """把最近一帧桌面底图暴露成 QML 的 image://backdrop/... 资源。"""
+    """把最近一帧桌面底图暴露成 QML 的 image://backdrop/... 资源。
+
+    线程模型必须小心：requestImage 是 **Qt Quick 渲染线程** 调进来的，
+    而 capture() 在主线程跑（唤出面板时）。两边都要碰同一批 QImage。
+
+    QImage 是隐式共享的，而它的共享不是线程安全的——渲染线程拿着一张图
+    正上传纹理时，主线程替换同一份数据，就可能写到已经释放的内存上，
+    表现为随机的 access violation。实测就是这样崩的：连着按几次热键
+    快速 show/hide，跑了七小时的程序当场就没了。
+
+    所以这里的规矩是两条：
+    1. 字段读写全部过一把锁；
+    2. 交给 Qt 的一律是深拷贝（.copy()），绝不把内部 QImage 本身交出去，
+       免得 Qt 那边的非 const 操作触发 detach 又和这边撞上。
+    """
 
     def __init__(self) -> None:
         super().__init__(QQuickImageProvider.Image)
+        self._lock = threading.Lock()
         self._image = QImage()
         self._sharp = QImage()
         self._card = QImage()
@@ -42,9 +58,24 @@ class BackdropProvider(QQuickImageProvider):
 
         # image://backdrop/sharp —— 清晰壁纸，给卡片模式当整屏底图
         if sid.startswith("sharp"):
-            return (self._sharp, self._sharp.size())
+            with self._lock:
+                if self._sharp.isNull():
+                    return (QImage(), QSize())
+                # 深拷贝：不能把内部那张交出去，否则 Qt 侧 detach 会和
+                # 下一帧的 capture() 撞车
+                img = self._sharp.copy()
+            return (img, img.size())
 
-        return (self._image, self._image.size())
+        with self._lock:
+            if self._image.isNull():
+                return (QImage(), QSize())
+            img = self._image.copy()
+        return (img, img.size())
+
+    def _snapshot(self):
+        """在锁内取一份当前尺寸信息，供裁切计算使用。"""
+        with self._lock:
+            return (self._card, self._full_w, self._full_h)
 
     def _card_region(self, sid: str):
         try:
@@ -59,12 +90,17 @@ class BackdropProvider(QQuickImageProvider):
         except ValueError:
             return (QImage(), QSize())
 
-        src = self._card if not self._card.isNull() else self._image
-        if src.isNull() or self._full_w <= 0 or self._full_h <= 0:
-            return (QImage(), QSize())
+        # 在锁内挑好源图并整张拷出来，之后的裁切都在自己的副本上做，
+        # 不再和 capture() 抢同一份数据
+        with self._lock:
+            src = self._card if not self._card.isNull() else self._image
+            if src.isNull() or self._full_w <= 0 or self._full_h <= 0:
+                return (QImage(), QSize())
+            src = src.copy()
+            full_w, full_h = self._full_w, self._full_h
 
-        sx = src.width() / float(self._full_w)
-        sy = src.height() / float(self._full_h)
+        sx = src.width() / float(full_w)
+        sy = src.height() / float(full_h)
         rx = max(0, min(src.width() - 1, int(x * sx)))
         ry = max(0, min(src.height() - 1, int(y * sy)))
         rw = max(1, min(src.width() - rx, int(w * sx)))
@@ -73,7 +109,8 @@ class BackdropProvider(QQuickImageProvider):
 
     @property
     def ready(self) -> bool:
-        return not self._image.isNull()
+        with self._lock:
+            return not self._image.isNull()
 
     def capture(self, screen=None, steps: int = 3) -> bool:
         """抓屏并降采样。失败时返回 False，界面会退回纯渐变底。"""
@@ -106,24 +143,31 @@ class BackdropProvider(QQuickImageProvider):
             Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         ox = max(0, (img.width() - screen_w) // 2)
         oy = max(0, (img.height() - screen_h) // 2)
-        img = img.copy(ox, oy, min(screen_w, img.width()), min(screen_h, img.height()))
-        self._sharp = img
-        self._full_w = img.width()
-        self._full_h = img.height()
+        sharp = img.copy(ox, oy, min(screen_w, img.width()),
+                         min(screen_h, img.height()))
 
         # 卡片用的磨砂层：降得轻一些，保留一点色彩结构，不至于糊成一片色块
-        cw = max(8, img.width() // 6)
-        ch = max(8, img.height() // 6)
-        self._card = img.scaled(
+        cw = max(8, sharp.width() // 6)
+        ch = max(8, sharp.height() // 6)
+        card = sharp.scaled(
             cw, ch, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
         # 连续减半：每级都是一次平滑下采样，串起来≈高斯
+        blurred = sharp
         for _ in range(max(1, steps)):
-            w = max(8, img.width() // 2)
-            h = max(8, img.height() // 2)
-            img = img.scaled(
+            w = max(8, blurred.width() // 2)
+            h = max(8, blurred.height() // 2)
+            blurred = blurred.scaled(
                 w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        self._image = img
+
+        # 重活都在锁外算完了，这里只做一个整体替换：渲染线程要么看到旧的一整套，
+        # 要么看到新的一整套，不会看到半新半旧
+        with self._lock:
+            self._sharp = sharp
+            self._card = card
+            self._image = blurred
+            self._full_w = sharp.width()
+            self._full_h = sharp.height()
         return True
 
     @staticmethod
