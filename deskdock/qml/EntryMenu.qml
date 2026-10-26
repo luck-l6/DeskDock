@@ -66,6 +66,13 @@ Item {
             text: root.currentId && controller.isPinned(root.currentId) ? "取消置顶" : "置顶"
             onTriggered: controller.togglePin(root.currentId)
         }
+        MenuItem {
+            // 在 Dock 上的显示"移出"，否则"放进"——自动填的那批也算"在"，
+            // 所以移出对自动模式同样有效（里面会先固化成手动列表）
+            text: root.currentId && controller.isDockItem(root.currentId)
+                  ? "从 Dock 移除" : "放进 Dock"
+            onTriggered: controller.toggleDock(root.currentId)
+        }
         MenuSeparator {}
         MenuItem {
             text: "在资源管理器中显示"

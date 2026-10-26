@@ -53,7 +53,9 @@ Window {
         if (dock.height !== fullH)
             dock.height = fullH;
         var tx = Math.round(scr.x + (scr.w - fullW) / 2);
-        var ty = Math.round(scr.bottom - fullH - 6);
+        // 离可用区底部留 28px：贴边那会儿既压着任务栏弹出区，
+        // 看着也像"掉到屏幕外面去了"
+        var ty = Math.round(scr.bottom - fullH - 28);
         if (dock.x !== tx)
             dock.x = tx;
         if (dock.y !== ty)
@@ -63,12 +65,17 @@ Window {
         reportGeo();
     }
 
-    visible: controller.dockVisible && items.length > 0
+    // 只剩系统项时也要留着：自己挑的应用被全移走了，还得能从这儿点开全部应用
+    visible: controller.dockVisible && (items.length > 0 || specials.length > 0)
     title: "DeskDockDock"
     color: "transparent"
     // Tool = 不进任务栏、不占 Alt+Tab；DoesNotAcceptFocus = 点 Dock 不会把
-    // 当前正在用的窗口踢到后台，启动完应用前台还是它
-    flags: Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
+    // 当前正在用的窗口踢到后台，启动完应用前台还是它。
+    //
+    // 关键是 StaysOnBottom 而不是 StaysOnTop：Dock 属于桌面，只在桌面露出来
+    // 的时候跟着露出来。置顶那会儿它压在别的窗口上面，挡住了人家窗口底部的
+    // 按钮（"部分应用在上面打不开"就是这么来的），而且放全屏视频时也糊在画面上。
+    flags: Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnBottomHint
            | Qt.WindowDoesNotAcceptFocus
 
     // 列表变了（装了新软件、刚启动过某个应用）就重新量一次
@@ -80,6 +87,10 @@ Window {
         if (visible) {
             refreshScreen();
             Qt.callLater(fit);
+            // 重新显示时再压一次底层，否则可能被别的窗口顶到上面去
+            Qt.callLater(function () {
+                controller.pinToBottom(dock);
+            });
         }
     }
 
@@ -107,6 +118,9 @@ Window {
         // 1 = DWMWA_SYSTEMBACKDROP_TYPE 关掉系统背景：玻璃由 QML 自己画，
         // 系统那层亚克力会和透明底色打架
         controller.applyEffects(dock, 1);
+        // 再压到 Z 序最底层。StaysOnBottom 只管创建时的层级，被别的窗口
+        // 顶上来之后就回不去了，这里显式压一次（和胶囊同一套做法）
+        controller.pinToBottom(dock);
         // 布局要等 RowLayout 算完才有 implicitWidth，callLater 排到下一次事件循环
         Qt.callLater(fit);
         Qt.callLater(fit);
@@ -166,6 +180,15 @@ Window {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: controller.launchDockItem(modelData.entryId)
+            }
+
+            // 右键移出。单独一个只认右键的 MouseArea：它不抢左键，
+            // 左键照旧落到上面那个。别去 cellMa 里读 mouse.button ——
+            // 那个参数在部分信号里拿不到，读一下就整个处理器失效
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.RightButton
+                onClicked: controller.toggleDock(modelData.entryId)
             }
         }
     }

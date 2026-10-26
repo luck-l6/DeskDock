@@ -546,8 +546,18 @@ Window {
                         checked: controller.dockVisible
                         onToggled: controller.setDockVisible(value)
                     }
+                    Text {
+                        width: parent.width
+                        height: 22
+                        text: "在面板里右键应用 → 放进 Dock / 从 Dock 移除"
+                        color: "#71808F"
+                        font.family: "Microsoft YaHei UI"
+                        font.pixelSize: 12
+                    }
                     StepRow {
                         label: "Dock 图标大小"
+                        low: 32
+                        high: 80
                         value: controller.dockIconSize
                         // 不直接改 value，交给 Python 存盘后再由 optionsChanged 回流，
                         // 这样绑定不会被自己写断

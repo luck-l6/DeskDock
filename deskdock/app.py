@@ -78,6 +78,8 @@ class Controller(QObject):
     dockVisibleChanged = pyqtSignal(bool)
     dockItemsChanged = pyqtSignal()
     dockGeometryChanged = pyqtSignal()
+    # 进程起来了又很快死掉：Shell 那边报的是成功，只有回头验尸才知道
+    launchFailed = pyqtSignal(str, str)
     # 开关类选项共用一个通知：值变了让 QML 重读一次即可
     optionsChanged = pyqtSignal()
 
@@ -428,18 +430,18 @@ class Controller(QObject):
 
     def getDockIconSize(self) -> int:
         try:
-            return max(28, min(64, int(config.get("dock_icon_size") or 48)))
+            return max(32, min(80, int(config.get("dock_icon_size") or 64)))
         except (TypeError, ValueError):
-            return 48
+            return 64
 
     @pyqtSlot(int)
     def setDockIconSize(self, size: int) -> None:
-        """Dock 图标大小。范围收紧到 28–64：再小就点不准，再大一个屏幕放不下几个。"""
+        """Dock 图标大小。32 已经小到不好点，80 再往上一条屏幕就放不下几个了。"""
         try:
             size = int(size)
         except (TypeError, ValueError):
             return
-        size = max(28, min(64, size))
+        size = max(32, min(80, size))
         if size == self.getDockIconSize():
             return
         config.set("dock_icon_size", size)
@@ -447,30 +449,88 @@ class Controller(QObject):
 
     dockIconSize = pyqtProperty(int, getDockIconSize, notify=optionsChanged)
 
+    def _dock_item_limit(self) -> int:
+        """Dock 能放几个应用：把屏幕宽度的 62% 让给这条栏，按当前图标大小算格数。
+
+        条数不再写死一个常数——写死之后"长度"就永远不变了，装了新软件、
+        图标调大调小都不会有反应。配置里 `dock_max_items` 填正数就是手动
+        上限，0 表示完全交给这里算（默认）。
+        """
+        try:
+            cap = int(config.get("dock_max_items") or 0)
+        except (TypeError, ValueError):
+            cap = 0
+        icon = self.getDockIconSize()
+        try:
+            screen = QGuiApplication.primaryScreen()
+            avail_w = screen.availableGeometry().width() if screen else 1920
+        except Exception:
+            avail_w = 1920
+        budget = int(avail_w * 0.62)
+        # 左边格子 + 右边齿轮 + 三条分隔线 + 玻璃左右留白 + 窗口投影余量
+        fixed = icon * 2 + 3 + 24 + 48
+        fit = (budget - fixed) // (icon + 5)
+        n = max(4, min(fit, 32))
+        return min(n, cap) if cap > 0 else n
+
     def getDockItems(self) -> list:
-        """Dock 里显示的应用：沿用面板那套排序，只要应用，截前 N 个。
+        """Dock 里显示什么。
+
+        两种模式：自己挑的（dock_manual）就照着 dock_pins 的先后顺序来，
+        长度完全等于挑了几个；还没挑过就按使用频率自动填，避免初次打开
+        是一条空栏。
 
         这里直接算一份列表给 QML，而不是再挂一个 QSortFilterProxyModel：
         代理模型和面板共用一个 sourceModel 时，两边 setCategory / setQuery
         会互相踩，面板一搜索 Dock 就跟着变空。
         """
-        try:
-            limit = max(1, int(config.get("dock_max_items") or 12))
-        except (TypeError, ValueError):
-            limit = 12
         hidden = set(config.get("hidden") or [])
-        items: list[dict] = []
-        for e in self.model.all_entries():
-            if e.id in hidden or e.kind not in ("app", "url"):
-                continue
-            items.append({
-                "entryId": e.id,
-                "name": e.name,
-                "iconPath": self.model.icon_path(e.id),
-            })
-            if len(items) >= limit:
-                break
-        return items
+        entries = self.model.all_entries()
+
+        if config.get("dock_manual"):
+            by_id = {e.id: e for e in entries}
+            picked = [by_id[i] for i in (config.get("dock_pins") or [])
+                      if i in by_id and i not in hidden]
+        else:
+            limit = self._dock_item_limit()
+            picked = []
+            for e in entries:
+                if e.id in hidden or e.kind not in ("app", "url"):
+                    continue
+                picked.append(e)
+                if len(picked) >= limit:
+                    break
+
+        return [{"entryId": e.id, "name": e.name,
+                 "iconPath": self.model.icon_path(e.id)} for e in picked]
+
+    @pyqtSlot(str, result=bool)
+    def isDockItem(self, entry_id: str) -> bool:
+        """这个条目现在是不是就在 Dock 上（自动填的也算）。"""
+        return bool(entry_id) and any(
+            it["entryId"] == entry_id for it in self.getDockItems())
+
+    @pyqtSlot(str)
+    def toggleDock(self, entry_id: str) -> None:
+        """放进 / 移出 Dock。
+
+        自动模式下动它，先把眼下真正显示的那批固化成手动列表再改，
+        否则"移出"在自动模式里无从下手（它本来就不在任何列表里）。
+        """
+        if not entry_id:
+            return
+        manual = bool(config.get("dock_manual"))
+        if manual:
+            pins = list(config.get("dock_pins") or [])
+        else:
+            pins = [it["entryId"] for it in self.getDockItems()]
+        if entry_id in pins:
+            pins.remove(entry_id)
+        else:
+            pins.append(entry_id)
+        config.set("dock_pins", pins)
+        config.set("dock_manual", True)
+        self.dockItemsChanged.emit()
 
     def getDockSpecial(self) -> list:
         """Dock 最左边的固定系统项（此电脑、回收站）。
@@ -509,7 +569,7 @@ class Controller(QObject):
             log.info("launchDockItem: 找不到条目 %r", entry_id)
             return
         log.info("launchDockItem: %s kind=%s", entry.name, entry.kind)
-        launch(entry)
+        self._launch(entry)
         config.record_use(entry_id)
         self._schedule_save()
         self.model.reorder()
@@ -708,6 +768,19 @@ class Controller(QObject):
         self.resultCountChanged.emit(self.filter.rowCount())
 
     @pyqtSlot(str)
+    def _launch(self, entry) -> None:
+        """统一的启动入口：进程起来又秒退时发 launchFailed 通知 UI。
+
+        Shell 那边对这种情况报的是成功，光看日志永远发现不了；以前就是
+        这样，用户点了没反应，日志里却只有一行"启动调用已返回"。
+        """
+        def failed(e, code):
+            # 这里是后台线程，信号要切回主线程再发
+            name, detail = e.name, "退出码 0x%X" % code
+            QTimer.singleShot(0, lambda: self.launchFailed.emit(name, detail))
+
+        launch(entry, on_fail=failed)
+
     def launchById(self, entry_id: str) -> None:
         if not entry_id:
             entry_id = self.filter.first_row_id()
@@ -724,7 +797,7 @@ class Controller(QObject):
         # 先收起面板再启动：startfile 可能阻塞好几秒，不能让它挡着动画
         self.hide_panel()
         # launch 是异步的，调用即返回；真正的成败在后台线程里记日志
-        launch(entry)
+        self._launch(entry)
         config.record_use(entry_id)
         self._schedule_save()
         self.model.reorder()
@@ -1382,6 +1455,20 @@ def main() -> int:
         for _k, _v in _shot_targets:
             # 用默认参数把循环变量钉住，否则所有 lambda 都指向最后一次迭代
             _QTimer.singleShot(6000, lambda k=_k, v=_v: _grab(k, v))
+
+    # 进程秒退这种事必须让用户知道：Shell 报的是成功，不提示的话
+    # 他只会看到"点了没反应"，而日志里干干净净什么都没有
+    def _on_launch_failed(name: str, detail: str) -> None:
+        try:
+            tray.showMessage(
+                "DeskDock",
+                f"「{name}」启动了但随即退出（{detail}）。"
+                "常见原因是它的渲染子进程起不来，可试试用资源管理器直接打开一次。",
+                QSystemTrayIcon.Warning, 8000)
+        except Exception:
+            pass
+
+    ctrl.launchFailed.connect(_on_launch_failed)
 
     # ---- 系统桌面图标：埋好恢复兜底再隐藏，退出时必须还回去 ----
     crashed = _mark_session_start()
