@@ -31,6 +31,10 @@ _DEFAULTS: dict[str, Any] = {
     "capsule_y": -1,
     "capsule_auto_hide": True,         # 鼠标不靠近时半透明淡出
     "capsule_always_on_desktop": True, # 嵌到桌面图层（Win+D 时跟随桌面）
+    # 底部 Dock 栏：常驻的一条图标条，点图标直接启动，不用先唤起面板
+    "dock_visible": True,
+    "dock_icon_size": 34,              # 单个图标的逻辑像素边长
+    "dock_max_items": 12,              # 最多显示几个应用（按使用频率取前 N 个）
     "sort_by": "frequency",            # frequency | name | manual（拖拽排出来的顺序）
     "order": [],                       # manual 模式下的 id 顺序；不在表里的排在末尾
     "grid_columns": 7,

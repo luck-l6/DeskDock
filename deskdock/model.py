@@ -172,6 +172,9 @@ class AppModel(QAbstractListModel):
     def iconOf(self, entry_id: str) -> str:
         return self._icons.get(entry_id, "")
 
+    def icon_path(self, entry_id: str) -> str:
+        return self._icons.get(entry_id, "")
+
     def all_entries(self) -> list[AppEntry]:
         return list(self._entries)
 

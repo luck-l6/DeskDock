@@ -445,6 +445,11 @@ Window {
                         onToggled: controller.setCapsuleVisible(value)
                     }
                     SwitchRow {
+                        label: "显示底部 Dock 栏"
+                        checked: controller.dockVisible
+                        onToggled: controller.setDockVisible(value)
+                    }
+                    SwitchRow {
                         label: "胶囊平时半透明淡出"
                         checked: controller.autoHide
                         onToggled: controller.setAutoHide(value)

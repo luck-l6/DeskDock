@@ -75,6 +75,9 @@ class Controller(QObject):
     backdropReadyChanged = pyqtSignal(bool)
     categoryChanged = pyqtSignal(str)
     categoryCountsChanged = pyqtSignal()
+    dockVisibleChanged = pyqtSignal(bool)
+    dockItemsChanged = pyqtSignal()
+    dockGeometryChanged = pyqtSignal()
     # 开关类选项共用一个通知：值变了让 QML 重读一次即可
     optionsChanged = pyqtSignal()
 
@@ -90,6 +93,7 @@ class Controller(QObject):
         self._panel = None
         self._capsule = None
         self._settings = None
+        self._dock = None
         self._backdrop_token = 0
         self._last_toggle_at = 0.0
         self._category = config.get("category") or "all"
@@ -108,6 +112,15 @@ class Controller(QObject):
         self.filter.setSourceModel(self.model)
         self.filter.countChanged.connect(self.resultCountChanged)
         self.filter.setCategory(self._category)
+
+        # Dock 的列表刷新：图标是异步一个个到的，一次扫描会触发上百次
+        # dataChanged。攒到一起再通知，否则 Dock 会重建上百遍。
+        self._dock_refresh = QTimer(self)
+        self._dock_refresh.setSingleShot(True)
+        self._dock_refresh.setInterval(280)
+        self._dock_refresh.timeout.connect(self.dockItemsChanged)
+        self.model.dataChanged.connect(lambda *a: self._dock_refresh.start())
+        self.model.modelReset.connect(self.dockItemsChanged)
 
         self.icons = IconStore(self)
         self.icons.iconReady.connect(self.model.set_icon)
@@ -392,6 +405,102 @@ class Controller(QObject):
     @pyqtSlot(QObject)
     def registerSettings(self, win) -> None:
         self._settings = win
+
+    @pyqtSlot(QObject)
+    def registerDock(self, win) -> None:
+        self._dock = win
+
+    # ---------------- Dock 栏 ----------------
+
+    def getDockVisible(self) -> bool:
+        return bool(config.get("dock_visible"))
+
+    @pyqtSlot(bool)
+    def setDockVisible(self, visible: bool) -> None:
+        visible = bool(visible)
+        if visible == self.getDockVisible():
+            return
+        config.set("dock_visible", visible)
+        self.dockVisibleChanged.emit(visible)
+        self.optionsChanged.emit()
+
+    dockVisible = pyqtProperty(bool, getDockVisible, notify=dockVisibleChanged)
+
+    def getDockIconSize(self) -> int:
+        try:
+            return max(20, min(64, int(config.get("dock_icon_size") or 34)))
+        except (TypeError, ValueError):
+            return 34
+
+    dockIconSize = pyqtProperty(int, getDockIconSize, notify=optionsChanged)
+
+    def getDockItems(self) -> list:
+        """Dock 里显示的应用：沿用面板那套排序，只要应用，截前 N 个。
+
+        这里直接算一份列表给 QML，而不是再挂一个 QSortFilterProxyModel：
+        代理模型和面板共用一个 sourceModel 时，两边 setCategory / setQuery
+        会互相踩，面板一搜索 Dock 就跟着变空。
+        """
+        try:
+            limit = max(1, int(config.get("dock_max_items") or 12))
+        except (TypeError, ValueError):
+            limit = 12
+        hidden = set(config.get("hidden") or [])
+        items: list[dict] = []
+        for e in self.model.all_entries():
+            if e.id in hidden or e.kind not in ("app", "url"):
+                continue
+            items.append({
+                "entryId": e.id,
+                "name": e.name,
+                "iconPath": self.model.icon_path(e.id),
+            })
+            if len(items) >= limit:
+                break
+        return items
+
+    dockItems = pyqtProperty("QVariantList", getDockItems,
+                             notify=dockItemsChanged)
+
+    @pyqtSlot(str)
+    def launchDockItem(self, entry_id: str) -> None:
+        """从 Dock 直接启动。不碰面板状态——Dock 是常驻的，不该顺手收起面板。"""
+        if not entry_id:
+            return
+        entry = self.model.entry_by_id(entry_id)
+        if entry is None:
+            log.info("launchDockItem: 找不到条目 %r", entry_id)
+            return
+        log.info("launchDockItem: %s kind=%s", entry.name, entry.kind)
+        launch(entry)
+        config.record_use(entry_id)
+        self._schedule_save()
+        self.model.reorder()
+        self._recount_categories()
+        # 频率变了，Dock 的排序跟着变（延迟一下，等图标/顺序都稳下来）
+        self._dock_refresh.start()
+
+    @pyqtSlot()
+    def openSettings(self) -> None:
+        if self._settings is None:
+            return
+        self.hide_panel()
+        self._settings.setProperty("visible", True)
+
+    @pyqtSlot(result="QVariant")
+    def dockScreenInfo(self) -> dict:
+        """Dock 定位要用的屏幕信息。
+
+        放 Python 里算而不是 QML 里读 Screen：Qt 5.15 的 Screen attached
+        property 在多屏下拿的是"窗口当前所在屏"，窗口还没显示时不可靠。
+        """
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return {"x": 0, "y": 0, "w": 1920, "h": 1080, "bottom": 1040}
+        geo = screen.availableGeometry()
+        return {"x": geo.x(), "y": geo.y(),
+                "w": geo.width(), "h": geo.height(),
+                "bottom": geo.y() + geo.height()}
 
     @pyqtSlot(QObject, int)
     def applyEffects(self, win, backdrop: int = 3) -> None:
@@ -1103,7 +1212,7 @@ def main() -> int:
     engine.rootContext().setContextProperty("appModel", ctrl.filter)
     engine.rootContext().setContextProperty("rawModel", ctrl.model)
 
-    for name in ("Panel.qml", "Capsule.qml", "Settings.qml"):
+    for name in ("Panel.qml", "Capsule.qml", "Settings.qml", "Dock.qml"):
         path = QML_DIR / name
         if not path.exists():
             log.error("缺少 QML 文件: %s", name)
@@ -1198,6 +1307,23 @@ def main() -> int:
     if not os.environ.get("DESKDOCK_NO_PREWARM"):
         _QTimer.singleShot(1500, _prewarm_show)
         _QTimer.singleShot(3300, _prewarm_hide)
+
+    # 调试用：把 Dock 窗口自己的渲染结果存成图片。截图受锁屏 / 其它置顶窗口
+    # 干扰，这个走 QQuickWindow::grabWindow()，抓的是窗口内容本身。
+    if os.environ.get("DESKDOCK_DOCK_SHOT"):
+        def _shot_dock():
+            win = ctrl._dock
+            if win is None:
+                log.info("Dock 抓图：窗口还没注册")
+                return
+            try:
+                img = win.grabWindow()
+                ok = img.save(os.environ["DESKDOCK_DOCK_SHOT"], "PNG")
+                log.info("Dock 抓图 %dx%d 保存=%s", img.width(), img.height(), ok)
+            except Exception as exc:
+                log.exception("Dock 抓图失败: %s", exc)
+
+        _QTimer.singleShot(9000, _shot_dock)
 
     # ---- 系统桌面图标：埋好恢复兜底再隐藏，退出时必须还回去 ----
     crashed = _mark_session_start()
