@@ -18,6 +18,11 @@
    日志里却只有"启动调用已返回"——进程其实起来几秒就死了（Electron
    应用的 GPU 子进程起不来时会自杀）。所以启动后拿进程句柄等几秒，
    退出码不对就记下来并通知 UI，别再闷声不响。
+
+4. **"启动了"不等于"看得见"**。Electron 那批单实例应用第二次点击时，
+   新进程只是把命令行丢给旧实例就退出，窗口还缩在最小化/隐藏状态不动，
+   用户以为打不开。所以启动前先看一眼（activate.activate_if_hidden），
+   启动后再补一次置前（activate.activate_after_launch）。
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ import threading
 from ctypes import wintypes
 from pathlib import Path
 
+from . import activate
 from .scanner import AppEntry
 
 log = logging.getLogger(__name__)
@@ -143,6 +149,15 @@ def launch_sync(entry: AppEntry, on_fail=None) -> bool:
                     entry.name, entry.path, entry.target)
         return False
 
+    # ① 已经在跑、但窗口缩起来了 → 直接叫回来，不再启动新进程。
+    #    只有窗口确实看不见时才接管，多开型应用照旧能开新的。
+    if entry.kind == "app":
+        try:
+            if activate.activate_if_hidden(entry):
+                return True
+        except Exception as exc:
+            log.debug("唤起检查异常: %s", exc)
+
     handle = None
     try:
         # 后台线程里用 Shell API，先把这个线程初始化成 MTA，避免
@@ -162,30 +177,42 @@ def launch_sync(entry: AppEntry, on_fail=None) -> bool:
         log.warning("启动失败 %s: %s", entry.name, exc)
         return False
 
+    ok = False
     try:
         if handle is None:
             # 拿不到句柄（UWP、协议等），没法验，就信 Shell 的判断
-            return True
-        code = _wait_exit_code(handle)
-        if code is None:
-            return True
-        if code == 0:
-            # 启动器型应用（xxxLauncher.exe）拉起主程序后自己就退了，
-            # 退出码 0 是它的正常行为，只是主程序有没有起来这里看不到
-            log.debug("启动器已退出: %s", entry.name)
-            return True
-        log.warning(
-            "启动后很快退出: %s（%s）退出码=0x%X —— Shell 报的是成功，"
-            "但进程没能活下来", entry.name, target, code & 0xFFFFFFFF)
-        if on_fail is not None:
-            try:
-                on_fail(entry, code & 0xFFFFFFFF)
-            except Exception as exc:
-                log.debug("on_fail 回调异常: %s", exc)
-        return False
+            ok = True
+        else:
+            code = _wait_exit_code(handle)
+            if code is None:
+                ok = True
+            elif code == 0:
+                # 启动器型应用（xxxLauncher.exe）拉起主程序后自己就退了，
+                # 退出码 0 是它的正常行为，只是主程序有没有起来这里看不到
+                log.debug("启动器已退出: %s", entry.name)
+                ok = True
+            else:
+                log.warning(
+                    "启动后很快退出: %s（%s）退出码=0x%X —— Shell 报的是成功，"
+                    "但进程没能活下来", entry.name, target, code & 0xFFFFFFFF)
+                if on_fail is not None:
+                    try:
+                        on_fail(entry, code & 0xFFFFFFFF)
+                    except Exception as exc:
+                        log.debug("on_fail 回调异常: %s", exc)
+                ok = False
     finally:
         if handle:
             ctypes.WinDLL("kernel32").CloseHandle(handle)
+
+    # ② 启动完了再补一刀：新窗口也可能被别的窗口压在后面，
+    #    用户刚点过它，把它摆到前面才是他想要的。
+    if ok and entry.kind == "app":
+        try:
+            activate.activate_after_launch(entry)
+        except Exception as exc:
+            log.debug("启动后置前异常: %s", exc)
+    return ok
 
 
 def launch(entry: AppEntry, on_fail=None) -> bool:

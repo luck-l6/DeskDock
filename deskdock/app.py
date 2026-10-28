@@ -159,6 +159,10 @@ class Controller(QObject):
     def getViewMode(self) -> str:
         return self._view_mode
 
+    # 既是 property 的 setter（QML 里 controller.viewMode = "grid"），
+    # 也要能被显式调用（Settings.qml 里 controller.setViewMode(key)）。
+    # pyqtProperty 的 setter 不会自动注册成可调用方法，得自己补 @pyqtSlot。
+    @pyqtSlot(str)
     def setViewMode(self, mode: str) -> None:
         mode = "grid" if mode == "grid" else "launchpad"
         if mode == self._view_mode:
@@ -767,7 +771,9 @@ class Controller(QObject):
         self.filter.setQuery(self._query)
         self.resultCountChanged.emit(self.filter.rowCount())
 
-    @pyqtSlot(str)
+    # 注意：这里是纯内部方法，**不要**加 @pyqtSlot——之前装饰器被误放到
+    # 这里，导致下面的 launchById 没有 slot 注册，QML 点网格里的应用
+    # 调了个不存在的方法，静默失败（日志里连一条记录都没有）。
     def _launch(self, entry) -> None:
         """统一的启动入口：进程起来又秒退时发 launchFailed 通知 UI。
 
@@ -781,6 +787,7 @@ class Controller(QObject):
 
         launch(entry, on_fail=failed)
 
+    @pyqtSlot(str)
     def launchById(self, entry_id: str) -> None:
         if not entry_id:
             entry_id = self.filter.first_row_id()
