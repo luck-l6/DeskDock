@@ -62,7 +62,17 @@ def changed(commit: str) -> list[tuple[str, str]]:
 def main() -> int:
     repo, branch = sys.argv[1], sys.argv[2]
     head = gh(f"repos/{repo}/git/ref/heads/{branch}")["object"]["sha"]
-    pending = git("rev-list", "--reverse", f"{head}..HEAD").split()
+    # 远端头常常是上一次**由本脚本创建**的提交，本地压根没这个对象，
+    # `git rev-list 远端头..HEAD` 会直接失败。这时要显式给本地起点：
+    # 传上次推过的那个本地提交（见脚本末尾打印的本地 sha）。
+    try:
+        pending = git("rev-list", "--reverse", f"{head}..HEAD").split()
+    except subprocess.CalledProcessError:
+        if len(sys.argv) < 4:
+            raise SystemExit(
+                "本地没有远端头这个对象，需要补一个本地起点：\n"
+                f"  python tools/push_via_api.py {repo} {branch} <上次推过的本地提交>")
+        pending = git("rev-list", "--reverse", f"{sys.argv[3]}..HEAD").split()
     if not pending:
         print("没有待推送的提交")
         return 0
